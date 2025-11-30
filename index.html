@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Right Sonic Receiver v2.0</title>
+    <style>
+        body { background: #0d0d0d; color: #00ff9d; font-family: 'Segoe UI', monospace; display: flex; flex-direction: column; align-items: center; height: 100vh; margin: 0; overflow: hidden;}
+        h1 { text-shadow: 0 0 10px #00ff9d; margin-top: 20px; }
+        
+        /* Chat Area */
+        #chat-container { 
+            flex-grow: 1; width: 90%; max-width: 600px; border: 1px solid #333; 
+            border-radius: 10px; background: rgba(0,0,0,0.8); margin: 20px; 
+            overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px;
+        }
+        .msg { background: #1a1a1a; padding: 10px 15px; border-radius: 15px 15px 15px 0; align-self: flex-start; border-left: 4px solid #00ff9d; animation: popIn 0.3s ease; }
+        @keyframes popIn { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+        /* Visualizer */
+        canvas { width: 100%; height: 150px; background: #000; border-top: 2px solid #00ff9d; }
+        
+        /* Controls */
+        .controls { margin-bottom: 20px; }
+        button { background: #00ff9d; border: none; padding: 10px 30px; font-size: 16px; font-weight: bold; cursor: pointer; border-radius: 20px; color: #000; transition: 0.2s; }
+        button:hover { transform: scale(1.05); box-shadow: 0 0 15px #00ff9d; }
+        
+        #status-text { font-size: 0.9em; color: #666; margin-top: 5px; }
+    </style>
+</head>
+<body>
+
+    <h1>📡 RIGHT SONIC v2.0</h1>
+    <div id="chat-container">
+        <div class="msg">System: Waiting for transmission...</div>
+    </div>
+
+    <div class="controls">
+        <button onclick="initAudio()">ACTIVATE RECEIVER</button>
+        <div id="status-text">Microphone: Offline</div>
+    </div>
+
+    <canvas id="scope"></canvas>
+
+    <script>
+        let audioCtx, analyser, source;
+        const BASE_FREQ = 1200; // Must match Python
+        let messageBuffer = "";
+        let isCollecting = false;
+
+        async function initAudio() {
+            try {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 2048;
+                
+                source = audioCtx.createMediaStreamSource(stream);
+                source.connect(analyser);
+                
+                document.getElementById('status-text').innerText = "Microphone: Active | Listening for Carrier Wave...";
+                drawScope();
+                processAudio();
+            } catch(e) { alert("Mic Error: " + e); }
+        }
+
+        function processAudio() {
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            const loop = () => {
+                analyser.getByteFrequencyData(dataArray);
+                
+                // 1. Find Peak Frequency
+                let maxVal = 0; 
+                let maxIndex = 0;
+                for(let i=0; i<bufferLength; i++) {
+                    if(dataArray[i] > maxVal) { maxVal = dataArray[i]; maxIndex = i; }
+                }
+                
+                const freq = maxIndex * (audioCtx.sampleRate / analyser.fftSize);
+                
+                // 2. Decoding Logic
+                if (maxVal > 100) { // Noise Gate
+                    // Check for Start Signal (approx 4000Hz)
+                    if (freq > 3900 && freq < 4100) {
+                        if (!isCollecting) {
+                            isCollecting = true;
+                            messageBuffer = "";
+                            addSystemMessage("Incoming Transmission Detected...");
+                        }
+                    }
+                    // Check for Data
+                    else if (isCollecting && freq > BASE_FREQ) {
+                        // Reverse the math: (Freq - Base) / 10 = ASCII Code
+                        let code = Math.round((freq - BASE_FREQ) / 10);
+                        if (code > 30 && code < 127) { // Valid ASCII range
+                            let char = String.fromCharCode(code);
+                            
+                            // Basic Debounce (Wait for silence or new char)
+                            if (!messageBuffer.endsWith(char)) {
+                                messageBuffer += char;
+                                updateLivePreview(messageBuffer);
+                            }
+                        }
+                    }
+                } 
+                else if (isCollecting && messageBuffer.length > 5 && maxVal < 50) {
+                    // Silence detected after message -> End Transmission
+                    // (In a real app, we'd wait for an explicit "END" tone)
+                    // For now, we just push the message if silence persists
+                    // setTimeout(() => finalizeMessage(), 1000); 
+                }
+                
+                requestAnimationFrame(loop);
+            };
+            loop();
+        }
+
+        function addSystemMessage(text) {
+            const div = document.createElement('div');
+            div.className = 'msg';
+            div.style.color = '#888';
+            div.innerText = "System: " + text;
+            document.getElementById('chat-container').appendChild(div);
+        }
+
+        function updateLivePreview(text) {
+            // Clean up protocol markers like "START:" or ":END"
+            let cleanText = text.replace("START:", "").replace(":END", "");
+            
+            // Update the last bubble or create new one
+            let lastMsg = document.querySelector('.msg:last-child');
+            if (lastMsg && lastMsg.classList.contains('live')) {
+                lastMsg.innerText = cleanText;
+            } else {
+                const div = document.createElement('div');
+                div.className = 'msg live';
+                div.innerText = cleanText;
+                document.getElementById('chat-container').appendChild(div);
+            }
+        }
+
+        function drawScope() {
+            const canvas = document.getElementById('scope');
+            const ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth;
+            
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+
+            const draw = () => {
+                analyser.getByteTimeDomainData(dataArray);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.2)'; // Trail effect
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#00ff9d';
+                ctx.beginPath();
+
+                const sliceWidth = canvas.width / bufferLength;
+                let x = 0;
+
+                for(let i = 0; i < bufferLength; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = v * canvas.height/2;
+                    if(i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                    x += sliceWidth;
+                }
+                ctx.stroke();
+                requestAnimationFrame(draw);
+            };
+            draw();
+        }
+    </script>
+</body>
+</html>
